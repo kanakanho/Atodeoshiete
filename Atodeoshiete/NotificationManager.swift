@@ -1,5 +1,12 @@
+import Combine
 import Foundation
+import UIKit
 import UserNotifications
+
+enum ReminderScheduleMode: String {
+    case afterMinutes
+    case atTime
+}
 
 @MainActor
 final class NotificationManager: NSObject, ObservableObject {
@@ -37,18 +44,48 @@ final class NotificationManager: NSObject, ObservableObject {
         }
     }
 
-    func scheduleReminder(icon: String, message: String, secondsFromNow: TimeInterval = 60) {
+    func scheduleReminder(
+        title: String,
+        body: String,
+        iconType: ReminderIconType,
+        emoji: String,
+        mode: ReminderScheduleMode,
+        minutesFromNow: Int,
+        secondsFromNow: Int,
+        hour: Int,
+        minute: Int
+    ) {
         lastError = nil
 
-        let trimmedIcon = icon.trimmingCharacters(in: .whitespacesAndNewlines)
-        let trimmedMessage = message.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedBody = body.trimmingCharacters(in: .whitespacesAndNewlines)
 
         let content = UNMutableNotificationContent()
-        content.title = trimmedIcon.isEmpty ? "あとでおしえて" : "\(trimmedIcon) あとでおしえて"
-        content.body = trimmedMessage.isEmpty ? "設定したメッセージがありません" : trimmedMessage
+        content.title = trimmedTitle.isEmpty ? "あとでおしえて" : trimmedTitle
+        content.body = trimmedBody.isEmpty ? "設定したメッセージがありません" : trimmedBody
         content.sound = .default
 
-        let trigger = UNTimeIntervalNotificationTrigger(timeInterval: secondsFromNow, repeats: false)
+        if let attachment = makeIconAttachment(iconType: iconType, emoji: emoji) {
+            content.attachments = [attachment]
+        }
+
+        let trigger: UNNotificationTrigger
+        let fireDate: Date?
+
+        switch mode {
+        case .afterMinutes:
+            let totalSeconds = TimeInterval(max(1, minutesFromNow * 60 + secondsFromNow))
+            trigger = UNTimeIntervalNotificationTrigger(timeInterval: totalSeconds, repeats: false)
+            fireDate = Date().addingTimeInterval(totalSeconds)
+        case .atTime:
+            var components = DateComponents()
+            components.hour = hour
+            components.minute = minute
+            let calendarTrigger = UNCalendarNotificationTrigger(dateMatching: components, repeats: false)
+            trigger = calendarTrigger
+            fireDate = calendarTrigger.nextTriggerDate()
+        }
+
         let request = UNNotificationRequest(identifier: reminderIdentifier, content: content, trigger: trigger)
 
         center.removePendingNotificationRequests(withIdentifiers: [reminderIdentifier])
@@ -57,7 +94,7 @@ final class NotificationManager: NSObject, ObservableObject {
                 if let error {
                     self?.lastError = error.localizedDescription
                 } else {
-                    self?.lastScheduledFireDate = Date().addingTimeInterval(secondsFromNow)
+                    self?.lastScheduledFireDate = fireDate
                 }
             }
         }
@@ -66,6 +103,27 @@ final class NotificationManager: NSObject, ObservableObject {
     func cancelScheduledReminder() {
         center.removePendingNotificationRequests(withIdentifiers: [reminderIdentifier])
         lastScheduledFireDate = nil
+    }
+
+    // UNNotificationAttachment moves the file it is given into its own storage,
+    // so a fresh temp copy is made each time rather than handing over the persisted photo file.
+    private func makeIconAttachment(iconType: ReminderIconType, emoji: String) -> UNNotificationAttachment? {
+        let tmpDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        guard (try? FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)) != nil else {
+            return nil
+        }
+        let fileURL = tmpDir.appendingPathComponent("icon.jpg")
+
+        let imageData: Data?
+        switch iconType {
+        case .photo:
+            imageData = ReminderIconStore.hasPhoto ? try? Data(contentsOf: ReminderIconStore.photoURL) : nil
+        case .emoji:
+            imageData = ReminderIconStore.emojiImage(emoji).jpegData(compressionQuality: 0.9)
+        }
+
+        guard let imageData, (try? imageData.write(to: fileURL)) != nil else { return nil }
+        return try? UNNotificationAttachment(identifier: UUID().uuidString, url: fileURL, options: nil)
     }
 }
 
